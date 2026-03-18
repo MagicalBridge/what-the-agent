@@ -1,0 +1,19 @@
+{
+  "name": "tools-test",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --check index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@langchain/openai": "^1.2.12",
+    "dotenv": "^17.2.2",
+    "zod": "^3.23.8"
+  }
+}
