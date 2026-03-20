@@ -81,47 +81,55 @@ const messages = [
   new HumanMessage("请读取 ./index.js 文件内容并解释代码"),
 ]
 
-let response = await modelWithTools.invoke(messages)
+// ---- 辅助函数 ----
 
-while (true) {
-  messages.push(response)
-
-  if (!response.tool_calls || response.tool_calls.length === 0) {
-    break
+/** 执行单个工具调用，返回结果字符串 */
+async function executeTool(toolCall) {
+  const matchedTool = tools.find((t) => t.name === toolCall.name)
+  if (!matchedTool) {
+    return `错误: 找不到工具 ${toolCall.name}`
   }
 
-  console.log(`\n[检测到 ${response.tool_calls.length} 个工具调用]`)
-
-  const toolResults = await Promise.all(
-    response.tool_calls.map(async (toolCall) => {
-      const matchedTool = tools.find((t) => t.name === toolCall.name)
-      if (!matchedTool) {
-        return `错误: 找不到工具 ${toolCall.name}`
-      }
-
-      console.log(
-        `  [执行工具] ${toolCall.name}(${JSON.stringify(toolCall.args)})`,
-      )
-      try {
-        const result = await matchedTool.invoke(toolCall.args)
-        return result
-      } catch (error) {
-        return `错误: ${error.message}`
-      }
-    }),
-  )
-
-  response.tool_calls.forEach((toolCall, index) => {
-    messages.push(
-      new ToolMessage({
-        content: toolResults[index],
-        tool_call_id: toolCall.id,
-      }),
-    )
-  })
-
-  response = await modelWithTools.invoke(messages)
+  console.log(`  [执行工具] ${toolCall.name}(${JSON.stringify(toolCall.args)})`)
+  try {
+    return await matchedTool.invoke(toolCall.args)
+  } catch (error) {
+    return `错误: ${error.message}`
+  }
 }
 
+/** 判断模型响应是否包含工具调用 */
+function hasToolCalls(response) {
+  return response.tool_calls && response.tool_calls.length > 0
+}
+
+/** 并行执行所有工具调用，将结果作为 ToolMessage 追加到 messages */
+async function handleToolCalls(toolCalls, messages) {
+  console.log(`\n[检测到 ${toolCalls.length} 个工具调用]`)
+
+  const results = await Promise.all(toolCalls.map(executeTool))
+
+  for (let i = 0; i < toolCalls.length; i++) {
+    messages.push(
+      new ToolMessage({
+        content: results[i],
+        tool_call_id: toolCalls[i].id,
+      }),
+    )
+  }
+}
+
+// ---- 主流程 ----
+
+let response = await modelWithTools.invoke(messages)
+
+// 工具调用循环：模型返回 tool_calls → 执行工具 → 回传结果 → 再次调用模型
+while (hasToolCalls(response)) {
+  messages.push(response) // 第 1 步：先把 AI 的响应加入消息历史
+  await handleToolCalls(response.tool_calls, messages) // 第 2 步：执行工具，把结果加入消息历史
+  response = await modelWithTools.invoke(messages) // 第 3 步：带着完整历史再次调用模型
+}
+
+// 循环结束，模型不再调用工具，输出最终文本回复
 console.log("\n[最终回复]")
 console.log(response.content)
