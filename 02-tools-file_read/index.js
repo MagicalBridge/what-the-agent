@@ -15,7 +15,7 @@ if (!apiKey) {
   throw new Error("Missing MINIMAX_API_KEY in environment")
 }
 
-const modelName = process.env.MINIMAX_MODEL_NAME ?? "MiniMax-M2.5"
+const modelName = process.env.MINIMAX_MODEL_NAME ?? "MiniMax-M2.7"
 const baseURL = process.env.MINIMAX_BASE_URL ?? "https://api.minimax.chat/v1"
 
 const model = new ChatOpenAI({
@@ -78,7 +78,7 @@ const messages = [
 可用工具：
 - read_file: 读取文件内容（使用此工具来获取文件内容）
 `),
-  new HumanMessage("请读取 ./src/tool-file-read.mjs 文件内容并解释代码"),
+  new HumanMessage("请读取 ./index.js 文件内容并解释代码"),
 ]
 
 let response = await modelWithTools.invoke(messages)
