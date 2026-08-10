@@ -10,13 +10,14 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { z } from "zod"
 
-const apiKey = process.env.MINIMAX_API_KEY
+const apiKey = process.env.ZHIPU_API_KEY
 if (!apiKey) {
-  throw new Error("Missing MINIMAX_API_KEY in environment")
+  throw new Error("Missing ZHIPU_API_KEY in environment")
 }
 
-const modelName = process.env.MINIMAX_MODEL_NAME ?? "MiniMax-M2.7"
-const baseURL = process.env.MINIMAX_BASE_URL ?? "https://api.minimax.chat/v1"
+const modelName = process.env.ZHIPU_MODEL_NAME ?? "glm-4.6"
+const baseURL =
+  process.env.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4"
 
 const model = new ChatOpenAI({
   modelName,
