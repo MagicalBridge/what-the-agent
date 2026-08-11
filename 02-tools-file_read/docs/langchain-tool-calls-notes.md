@@ -4,7 +4,15 @@
 
 本项目在 [index.js](./index.js) 中使用 `@langchain/openai` 的 `ChatOpenAI`，并通过 `@langchain/core/tools` 的 `tool()` 定义一个 `read_file` 工具，让模型在需要时发起工具调用（tool calls），由本地代码执行后再把结果回传给模型继续推理。
 
-> **注意**：虽然使用了 `ChatOpenAI` 类，但实际连接的是 **MiniMax API**（模型 `MiniMax-M2.7`），通过 `configuration.baseURL` 指向 `https://api.minimax.chat/v1`。`ChatOpenAI` 在这里作为兼容 OpenAI 接口规范的通用客户端使用。不同提供商对 tool calls 的实现可能存在差异，这也是后文 400 报错需要关注的背景之一。
+> **注意**：虽然使用了 `ChatOpenAI` 类，但实际连接的是 **智谱AI（ZhipuAI）** 的开放平台（默认模型 `glm-4.6`），通过 `configuration.baseURL` 指向 `https://open.bigmodel.cn/api/paas/v4`。`ChatOpenAI` 在这里作为兼容 OpenAI 接口规范的通用客户端使用。相关配置均可通过环境变量覆盖：
+>
+> 1. `ZHIPU_API_KEY`：智谱 API Key（必填，缺失会直接抛错）。
+> 2. `ZHIPU_MODEL_NAME`：模型名，默认 `glm-4.6`。
+> 3. `ZHIPU_BASE_URL`：接口地址，默认 `https://open.bigmodel.cn/api/paas/v4`。
+>
+> 不同提供商对 tool calls 的实现可能存在差异，这也是后文 400 报错需要关注的背景之一。由于走的是 OpenAI 兼容协议，理论上只要换 `apiKey` / `baseURL` / `modelName` 即可切换到其他兼容服务商。
+>
+> 对应代码位置：[model 初始化](./index.js#L13-L29)。
 
 ## 2. `tool()` 为什么可以接收两个参数？
 
@@ -17,7 +25,7 @@
 3. 因此当 `schema` 定义了 `filePath` 字段时，`func` 可以写成：
    1. `async ({ filePath }) => { ... }`
 
-对应代码位置：[readFileTool](./index.js#L30-L59)。
+对应代码位置：[readFileTool](./index.js#L32-L60)。
 
 ### 2.2 第 2 个参数：`fields`（工具元信息与入参 Schema）
 
@@ -45,13 +53,13 @@
 2. `description: "用此工具来读取文件内容。当用户要求读取文件、查看代码、分析文件内容时，调用此工具。输入文件路径（可以是相对路径或绝对路径）。"`
 3. `schema: z.object({ filePath: z.string().describe("要读取的文件路径") })`
 
-对应代码位置：[readFileTool fields](./index.js#L51-L58)。
+对应代码位置：[readFileTool fields](./index.js#L52-L59)。
 
 ### 2.3 类型声明（证据）
 
 你当前依赖版本的 `@langchain/core` 对 `tool()` 的 TypeScript 声明在：
 
-1. `node_modules/@langchain/core/dist/tools/index.d.ts#L165-L220`
+1. `node_modules/@langchain/core/dist/tools/index.d.ts`
 
 其中明确写了多个重载，都是 `tool(func, fields)` 形式，并会根据 `schema` 类型返回 `DynamicTool` 或 `DynamicStructuredTool`。
 
@@ -70,13 +78,13 @@ const modelWithTools = model.bindTools(tools)
 2. 返回一个新的模型实例，后续调用 `invoke()` 时会自动携带工具定义。
 3. 模型收到工具定义后，就知道有哪些工具可用，可以在回复中发起 `tool_calls`。
 
-对应代码位置：[bindTools](./index.js#L64)。
+对应代码位置：[bindTools](./index.js#L65)。
 
-## 4. 400 报错：`tool result's tool id(...) not found (2013)` 是什么问题？
+## 4. 400 报错：`tool result's tool id(...) not found` 是什么问题？
 
-报错示例：
+报错示例（不同服务商的错误码/文案可能略有差异）：
 
-1. `BadRequestError: 400 invalid params, tool result's tool id(call_function_...) not found (2013)`
+1. `BadRequestError: 400 invalid params, tool result's tool id(call_function_...) not found`
 
 这类错误通常意味着：你发给模型的 `ToolMessage` 里带了某个 `tool_call_id`，但在“同一条对话消息历史”里，服务端找不到与之对应的 `tool_calls`（也就是缺少那条包含 tool_calls 的 Assistant 消息）。
 
@@ -101,36 +109,69 @@ const modelWithTools = model.bindTools(tools)
    3. 再次调用模型
 3. 直到 `response.tool_calls` 为空，输出最终 `response.content`
 
-### 6.1 并行执行多个工具调用
-
-当模型一次返回多个 `tool_calls` 时，可以使用 `Promise.all` 并行执行所有工具调用，提高效率：
+本项目把这个流程拆成了几个小函数，主循环非常直白：
 
 ```js
-const toolResults = await Promise.all(
-  response.tool_calls.map(async (toolCall) => {
-    const matchedTool = tools.find((t) => t.name === toolCall.name)
-    if (!matchedTool) {
-      return `错误: 找不到工具 ${toolCall.name}`
-    }
-    try {
-      const result = await matchedTool.invoke(toolCall.args)
-      return result
-    } catch (error) {
-      return `错误: ${error.message}`
-    }
-  }),
-)
+let response = await modelWithTools.invoke(messages)
+
+while (hasToolCalls(response)) {
+  messages.push(response)                              // 第 1 步：先把 AI 的响应加入消息历史
+  await handleToolCalls(response.tool_calls, messages) // 第 2 步：执行工具，把结果加入消息历史
+  response = await modelWithTools.invoke(messages)     // 第 3 步：带着完整历史再次调用模型
+}
 ```
 
-注意这里的错误处理：
+对应代码位置：[主流程工具循环](./index.js#L125-L132)。
+
+### 6.1 拆分出的辅助函数
+
+为了让主循环保持清晰，工具执行逻辑被抽成了三个辅助函数：
+
+1. `hasToolCalls(response)`：判断模型响应里是否包含工具调用。
+2. `executeTool(toolCall)`：执行**单个**工具调用，返回结果字符串。
+3. `handleToolCalls(toolCalls, messages)`：并行执行所有工具调用，并把结果作为 `ToolMessage` 追加到 `messages`。
+
+`executeTool` 中做了两层错误处理：
+
+```js
+async function executeTool(toolCall) {
+  const matchedTool = tools.find((t) => t.name === toolCall.name)
+  if (!matchedTool) {
+    return `错误: 找不到工具 ${toolCall.name}`   // 匹配失败：返回错误字符串而非抛异常
+  }
+  try {
+    return await matchedTool.invoke(toolCall.args)
+  } catch (error) {
+    return `错误: ${error.message}`             // 执行异常：捕获后作为结果返回
+  }
+}
+```
+
 - **工具匹配失败**：当 `tools.find()` 找不到对应工具时，返回错误字符串而非抛出异常，确保不会中断整个循环。
 - **工具执行异常**：用 `try/catch` 捕获工具内部错误，将错误信息作为结果返回给模型，让模型知道发生了什么并决定下一步。
 
 这两种情况下，错误信息都会被包装到 `ToolMessage` 中回传给模型，保持消息链完整。
 
-本项目修复后的循环实现位置：
+### 6.2 并行执行多个工具调用
 
-1. [工具循环](./index.js#L86-L127)
+当模型一次返回多个 `tool_calls` 时，`handleToolCalls` 使用 `Promise.all` 并行执行所有工具调用，提高效率，再按顺序把每个结果封装成 `ToolMessage`：
+
+```js
+async function handleToolCalls(toolCalls, messages) {
+  const results = await Promise.all(toolCalls.map(executeTool))
+
+  for (let i = 0; i < toolCalls.length; i++) {
+    messages.push(
+      new ToolMessage({
+        content: results[i],
+        tool_call_id: toolCalls[i].id,
+      }),
+    )
+  }
+}
+```
+
+对应代码位置：[辅助函数](./index.js#L85-L121)、[handleToolCalls](./index.js#L108-L121)。
 
 ## 7. 额外实践：`read_file` 为什么要拒绝目录？
 
@@ -144,7 +185,7 @@ const toolResults = await Promise.all(
 1. 路径规范化（相对路径转绝对路径）
 2. `fs.stat()` 判断必须是 `isFile()`
 
-对应代码位置：[readFileTool 实现](./index.js#L30-L49)。
+对应代码位置：[readFileTool 实现](./index.js#L32-L51)。
 
 ## 8. 完整调用流程总览
 
@@ -157,10 +198,10 @@ const toolResults = await Promise.all(
         ↓
 调用模型 modelWithTools.invoke(messages)
         ↓
-  ┌─ response 有 tool_calls？
+  ┌─ hasToolCalls(response)？
   │    ↓ 是
   │  1. push response 到 messages
-  │  2. 并行执行所有工具 (Promise.all)
+  │  2. handleToolCalls：Promise.all 并行执行所有工具
   │  3. 对每个 toolCall push ToolMessage
   │  4. 再次 invoke → 回到判断
   │    ↓ 否
@@ -171,8 +212,8 @@ const toolResults = await Promise.all(
 
 1. `tool()` 接收两个参数是框架设计：`tool(func, fields)`。
 2. `fields.schema` 既指导模型生成参数，也让运行时校验输入；`.describe()` 可为参数添加说明。
-3. `bindTools()` 是从”定义工具”到”模型可调用工具”的关键桥梁。
-4. 400 “tool id not found” 基本都指向”消息历史缺失 tool_calls 对应的 Assistant 消息”。
+3. `bindTools()` 是从“定义工具”到“模型可调用工具”的关键桥梁。
+4. 400 “tool id not found” 基本都指向“消息历史缺失 tool_calls 对应的 Assistant 消息”。
 5. 工具调用循环务必：先 push `response`，再 push `ToolMessage`，再 invoke 下一轮。
 6. 多个工具调用可用 `Promise.all` 并行执行，但要做好匹配失败和执行异常的错误处理。
-
+7. 本项目通过 OpenAI 兼容协议接入智谱AI（`glm-4.6`），切换服务商只需替换 `apiKey` / `baseURL` / `modelName`。
