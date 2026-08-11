@@ -22,16 +22,18 @@ const baseURL =
 const model = new ChatOpenAI({
   modelName,
   apiKey,
-  temperature: 0,
+  temperature: 0, // 0为确定性，1为随机性
   configuration: {
     baseURL,
   },
 })
 
 // 这个tool函数 传入了两个参数
+// 第一个参数是函数，第二个参数是工具的描述和schema
 const readFileTool = tool(
   async ({ filePath }) => {
-    // 解析文件路径，支持相对路径和绝对路径
+    // 解析文件路径，支持相对路径和绝对路径，path.isAbsolute(filePath)判断是否是绝对路径
+    // 如果是绝对路径，则直接使用，如果是相对路径，则使用path.resolve(process.cwd(), filePath)
     const resolvedPath = path.isAbsolute(filePath)
       ? filePath
       : path.resolve(process.cwd(), filePath)
@@ -50,8 +52,8 @@ const readFileTool = tool(
     return `文件内容:\n${content}`
   },
   {
-    name: "read_file",
-    description:
+    name: "read_file", // 工具的名称
+    description: // 工具的描述
       "用此工具来读取文件内容。当用户要求读取文件、查看代码、分析文件内容时，调用此工具。输入文件路径（可以是相对路径或绝对路径）。",
     schema: z.object({
       filePath: z.string().describe("要读取的文件路径"),
